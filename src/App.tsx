@@ -17,16 +17,85 @@ export default function App() {
     const BOSS_INTERVAL = 45000; // 45秒出BOSS
     const WAVE_INTERVAL = 3000; // 每3秒一波敵人
     const POWERUP_INTERVAL = 8000; // 每8秒出道具
-    const GAME_DURATION = 60; // 60秒生存
+    const GAME_DURATION = 60; // 每關 60 秒
+    const stageNames = ['外環巡邏', '小行星伏擊', '帝國封鎖線', '死星突擊', '銀河決戰'];
+    function readNumber(key: string) {
+      try {
+        const value = Number(localStorage.getItem(key));
+        return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+      } catch { return 0; }
+    }
+    function saveNumber(key: string, value: number) {
+      try { localStorage.setItem(key, String(value)); } catch { /* 私密模式仍可遊玩 */ }
+    }
+    let totalScore = readNumber('sw_strike_total');
+    let bestStage = Math.max(1, readNumber('sw_strike_stage'));
+    let stage = 1;
+    let settledScore = 0;
+    let stageBonus = 0;
+    let stageClearAt = 0;
+    let runEndedAt = 0;
+    let notice = '';
+    let noticeUntil = 0;
+    let animationId = 0;
+    const ranks = [0, 10000, 50000, 150000, 400000];
+    const rankNames = ['新兵', '飛行員', '王牌', '中隊長', '銀河傳奇'];
+    function rankIndex() {
+      return ranks.reduce((rank, threshold, i) => totalScore >= threshold ? i : rank, 0);
+    }
+    function bankScore() {
+      totalScore += Math.max(0, score - settledScore);
+      settledScore = score;
+      highScore = Math.max(highScore, score);
+      saveNumber('sw_strike_total', totalScore);
+      saveNumber('sw_strike_highscore', highScore);
+      saveNumber('sw_strike_stage', bestStage);
+    }
+    function finishRun() {
+      if (gameState !== 'playing') return;
+      gameState = 'gameover';
+      runEndedAt = Date.now();
+      bankScore();
+    }
+    function clearStage() {
+      if (gameState !== 'playing') return;
+      stageBonus = stage * 1500 + lives * 500;
+      score += stageBonus;
+      bestStage = Math.max(bestStage, stage);
+      bankScore();
+      gameState = 'stageclear';
+      stageClearAt = Date.now();
+      keys = {};
+      mouseDown = false;
+      touchActive = false;
+      playPowerup();
+    }
+    function nextStage() {
+      if (Date.now() - stageClearAt < 800) return;
+      stage++;
+      bestStage = Math.max(bestStage, stage);
+      saveNumber('sw_strike_stage', bestStage);
+      gameTime = GAME_DURATION;
+      lives = Math.min(5, lives + 1);
+      bullets = []; enemyBullets = []; enemies = []; powerups = []; particles = [];
+      bossRef = null;
+      player.x = CANVAS_W / 2; player.y = CANVAS_H - 100;
+      shieldActive = true; shieldTimer = 180;
+      invincible = false; doubleLaser = false;
+      lastProtonTime = -PROTON_COOLDOWN;
+      shootTimer = 0;
+      gameState = 'countdown';
+      countdownStart = Date.now();
+    }
 
     // ========== 遊戲狀態 ==========
-    let gameState: 'menu' | 'countdown' | 'playing' | 'gameover' = 'menu';
+    let gameState: 'menu' | 'countdown' | 'playing' | 'stageclear' | 'gameover' = 'menu';
     let countdownTimer = 3;
     let countdownStart = 0;
     let score = 0;
     let combo = 0;
     let maxCombo = 0;
-    let highScore = parseInt(localStorage.getItem('sw_strike_highscore') || '0');
+    let highScore = readNumber('sw_strike_highscore');
     let lives = 3;
     let gameTime = GAME_DURATION;
     let lastTime = 0;
@@ -583,8 +652,8 @@ export default function App() {
 
     // 生成敵機波次
     function spawnWave() {
-      const waveNum = Math.floor((GAME_DURATION - gameTime) / 10);
-      const count = 3 + waveNum * 2;
+      const waveNum = Math.floor((GAME_DURATION - gameTime) / 15) + Math.min(stage - 1, 8);
+      const count = Math.min(14, 3 + waveNum);
 
       for (let i = 0; i < count; i++) {
         const isInterceptor = Math.random() < 0.3 + waveNum * 0.05;
@@ -606,7 +675,7 @@ export default function App() {
     // 生成BOSS
     function spawnBoss() {
       if (bossRef) return;
-      const bossHp = 100 + Math.floor((GAME_DURATION - gameTime) / 15) * 20;
+      const bossHp = 70 + Math.min(stage - 1, 10) * 20;
       bossRef = {
         x: CANVAS_W / 2,
         y: -80,
@@ -662,18 +731,45 @@ export default function App() {
       // 清除所有敵機子彈
       enemyBullets = [];
 
-      // 對所有敵機造成大量傷害
-      enemies.forEach(e => {
+      enemies = enemies.filter(e => {
         e.hp -= 5;
         createExplosion(e.x, e.y, '#ffaa00', 10);
+        if (e.hp <= 0) { defeatEnemy(e); return false; }
+        return true;
       });
       if (bossRef) {
         bossRef.hp -= 20;
         createExplosion(bossRef.x, bossRef.y, '#ffaa00', 30);
+        if (bossRef.hp <= 0) defeatBoss();
       }
 
       // 全屏閃光效果
       screenShake = 15;
+    }
+
+    // 雷射和魚雷共用擊殺結算，避免漏分或重複計分。
+    function defeatEnemy(e: any) {
+              combo++;
+              maxCombo = Math.max(maxCombo, combo);
+              if (combo % 10 === 0) {
+                score += 500 * stage;
+                notice = `${combo} 連擊！獎勵 +${500 * stage}`;
+                noticeUntil = Date.now() + 1800;
+              }
+              score += (e.type === 'interceptor' ? 200 : 100) * Math.min(combo, 10);
+              playExplosion();
+              createExplosion(e.x, e.y, '#ff4400', 20);
+    }
+    function defeatBoss() {
+                score += 5000;
+                combo += 10;
+                maxCombo = Math.max(maxCombo, combo);
+                playExplosion();
+                createExplosion(bossRef.x, bossRef.y, '#8844ff', 50);
+                createExplosion(bossRef.x - 30, bossRef.y + 20, '#ff4400', 30);
+                createExplosion(bossRef.x + 30, bossRef.y - 20, '#ffaa00', 30);
+                screenShake = 20;
+                bossRef = null;
     }
 
     // 碰撞檢測
@@ -700,11 +796,7 @@ export default function App() {
       createExplosion(player.x, player.y, '#00ff88', 25);
 
       if (lives <= 0) {
-        gameState = 'gameover';
-        if (score > highScore) {
-          highScore = score;
-          localStorage.setItem('sw_strike_highscore', highScore.toString());
-        }
+        finishRun();
       }
     }
 
@@ -718,11 +810,7 @@ export default function App() {
       gameTime -= deltaTime / 1000;
       if (gameTime <= 0) {
         gameTime = 0;
-        gameState = 'gameover';
-        if (score > highScore) {
-          highScore = score;
-          localStorage.setItem('sw_strike_highscore', highScore.toString());
-        }
+        clearStage();
         return;
       }
 
@@ -782,14 +870,16 @@ export default function App() {
         return b.y < CANVAS_H + 20;
       });
 
+      if (gameState !== 'playing') return;
+
       // 生成波次
-      if (now - lastWaveTime > WAVE_INTERVAL) {
+      if (now - lastWaveTime > Math.max(1600, WAVE_INTERVAL - (stage - 1) * 150)) {
         spawnWave();
         lastWaveTime = now;
       }
 
       // 生成BOSS
-      if (now - lastBossTime > BOSS_INTERVAL) {
+      if (now - lastBossTime > Math.max(25000, BOSS_INTERVAL - (stage - 1) * 3000)) {
         spawnBoss();
         lastBossTime = now;
       }
@@ -802,6 +892,7 @@ export default function App() {
 
       // 更新敵機
       enemies = enemies.filter(e => {
+        if (gameState !== 'playing') return true;
         e.y += e.speed;
         if (e.zigzag) {
           e.zigzagTimer += 0.05;
@@ -826,11 +917,7 @@ export default function App() {
             e.hp--;
             createExplosion(bullets[i]?.x || e.x, e.y, '#ffaa00', 5);
             if (e.hp <= 0) {
-              combo++;
-              maxCombo = Math.max(maxCombo, combo);
-              score += (e.type === 'interceptor' ? 200 : 100) * Math.min(combo, 10);
-              playExplosion();
-              createExplosion(e.x, e.y, '#ff4400', 20);
+              defeatEnemy(e);
               return false;
             }
             break;
@@ -846,6 +933,8 @@ export default function App() {
 
         return e.y < CANVAS_H + 40;
       });
+
+      if (gameState !== 'playing') return;
 
       // 更新BOSS
       if (bossRef) {
@@ -885,14 +974,7 @@ export default function App() {
               bossRef.hp--;
               createExplosion(bullets[i]?.x || bossRef.x, bullets[i]?.y || bossRef.y, '#ffaa00', 3);
               if (bossRef.hp <= 0) {
-                score += 5000;
-                combo += 10;
-                playExplosion();
-                createExplosion(bossRef.x, bossRef.y, '#8844ff', 50);
-                createExplosion(bossRef.x - 30, bossRef.y + 20, '#ff4400', 30);
-                createExplosion(bossRef.x + 30, bossRef.y - 20, '#ffaa00', 30);
-                screenShake = 20;
-                bossRef = null;
+                defeatBoss();
                 break;
               }
             }
@@ -966,6 +1048,9 @@ export default function App() {
       } else if (gameState === 'playing') {
         drawGame();
         drawHUD();
+      } else if (gameState === 'stageclear') {
+        drawGame();
+        drawStageClear();
       } else if (gameState === 'gameover') {
         drawGame();
         drawHUD();
@@ -994,7 +1079,7 @@ export default function App() {
       ctx.fillStyle = '#FFE81F';
       ctx.font = 'bold 28px "Courier New", monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('NEON SERPENT', CANVAS_W / 2, CANVAS_H / 3 - 40);
+      ctx.fillText('銀河遠征 · 無限關卡', CANVAS_W / 2, CANVAS_H / 3 - 40);
       ctx.font = 'bold 32px "Courier New", monospace';
       ctx.fillText('STAR WARS STRIKE', CANVAS_W / 2, CANVAS_H / 3);
 
@@ -1017,6 +1102,9 @@ export default function App() {
       ctx.font = '14px "Courier New", monospace';
       ctx.fillText(`最高分: ${highScore}`, CANVAS_W / 2, CANVAS_H * 0.8);
 
+      ctx.font = '13px monospace';
+      ctx.fillStyle = '#00ccff';
+      ctx.fillText(`累積 ${totalScore} 分 · ${rankNames[rankIndex()]} · 最遠第 ${bestStage} 關`, CANVAS_W / 2, CANVAS_H * 0.84);
       // 操作說明
       ctx.fillStyle = '#888888';
       ctx.shadowBlur = 0;
@@ -1054,6 +1142,36 @@ export default function App() {
         ctx.shadowColor = '#00ff88';
         ctx.fillText('GO!', CANVAS_W / 2, CANVAS_H / 2);
       }
+      ctx.font = '18px monospace';
+      ctx.fillStyle = '#00ccff';
+      ctx.fillText(`第 ${stage} 關 · ${stageNames[(stage - 1) % stageNames.length]}`, CANVAS_W / 2, CANVAS_H / 2 + 90);
+      ctx.font = '13px monospace';
+      ctx.fillText('生存 60 秒過關 · 每關恢復 1 生命', CANVAS_W / 2, CANVAS_H / 2 + 120);
+      ctx.restore();
+    }
+
+    function drawStageClear() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 20, 0.9)';
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#FFE81F';
+      ctx.font = 'bold 32px monospace';
+      ctx.fillText(`第 ${stage} 關完成！`, 240, 210);
+      ctx.font = '18px monospace';
+      ctx.fillStyle = '#00ff88';
+      ctx.fillText(`通關 + 生存獎勵：+${stageBonus}`, 240, 265);
+      ctx.fillText(`本次遠征分數：${score}`, 240, 300);
+      ctx.fillStyle = '#00ccff';
+      ctx.fillText(`累積：${totalScore} · ${rankNames[rankIndex()]}`, 240, 345);
+      const next = ranks[rankIndex() + 1];
+      ctx.font = '14px monospace';
+      ctx.fillText(next ? `距離下一軍階還差 ${next - totalScore} 分` : '已達最高軍階！挑戰更遠的銀河', 240, 380);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(`下一關：${stageNames[stage % stageNames.length]}`, 240, 440);
+      ctx.fillText('恢復 1 生命 · 魚雷充能 · 開場護盾', 240, 475);
+      ctx.fillStyle = '#FFE81F';
+      ctx.fillText('點擊 / 按 Enter 繼續遠征', 240, 545);
       ctx.restore();
     }
 
@@ -1128,6 +1246,20 @@ export default function App() {
       ctx.textAlign = 'right';
       ctx.fillText(`${Math.ceil(gameTime)}s`, CANVAS_W - 10, 25);
 
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#00ccff';
+      ctx.textAlign = 'right';
+      ctx.fillText(`第 ${stage} 關 · ${stageNames[(stage - 1) % stageNames.length]}`, CANVAS_W - 10, 45);
+      ctx.fillStyle = '#183344';
+      ctx.fillRect(10, 52, CANVAS_W - 20, 3);
+      ctx.fillStyle = '#00ccff';
+      ctx.fillRect(10, 52, (CANVAS_W - 20) * (1 - gameTime / GAME_DURATION), 3);
+      if (Date.now() < noticeUntil) {
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#FFE81F';
+        ctx.font = 'bold 18px monospace';
+        ctx.fillText(notice, CANVAS_W / 2, 145);
+      }
       // 生命
       ctx.textAlign = 'left';
       ctx.fillStyle = '#00ff88';
@@ -1208,6 +1340,11 @@ export default function App() {
       ctx.shadowColor = '#00ff88';
       ctx.fillText(`最高分: ${highScore}`, CANVAS_W / 2, CANVAS_H / 3 + 110);
 
+      ctx.font = '14px monospace';
+      ctx.fillStyle = '#00ccff';
+      ctx.fillText(`抵達第 ${stage} 關 · 累積 ${totalScore} 分`, CANVAS_W / 2, 440);
+      const next = ranks[rankIndex() + 1];
+      ctx.fillText(`${rankNames[rankIndex()]}${next ? ` · 升階還差 ${next - totalScore} 分` : ' · 最高軍階'}`, CANVAS_W / 2, 470);
       // 新紀錄
       if (score >= highScore && score > 0) {
         const blink = Math.sin(Date.now() * 0.008) > 0;
@@ -1250,12 +1387,15 @@ export default function App() {
 
       update();
       render();
-      requestAnimationFrame(gameLoop);
+      animationId = requestAnimationFrame(gameLoop);
     }
 
     // ========== 重置遊戲 ==========
     function resetGame() {
       score = 0;
+      stage = 1;
+      settledScore = 0;
+      noticeUntil = 0;
       combo = 0;
       maxCombo = 0;
       lives = 3;
@@ -1286,11 +1426,17 @@ export default function App() {
 
     // ========== 輸入事件 ==========
     function handleKeyDown(e: KeyboardEvent) {
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+      if (e.repeat && gameState !== 'playing') return;
+      if (gameState === 'stageclear') {
+        if (e.code === 'Enter' || e.code === 'Space') nextStage();
+        return;
+      }
       keys[e.code] = true;
 
       if (gameState === 'menu') {
         startCountdown();
-      } else if (gameState === 'gameover') {
+      } else if (gameState === 'gameover' && Date.now() - runEndedAt > 800) {
         startCountdown();
       }
 
@@ -1306,6 +1452,8 @@ export default function App() {
     function handleMouseDown(e: MouseEvent) {
       mouseDown = true;
       initAudio();
+      if (gameState === 'stageclear') { nextStage(); return; }
+      if (gameState === 'gameover' && Date.now() - runEndedAt < 800) return;
       if (gameState === 'menu' || gameState === 'gameover') {
         startCountdown();
         return;
@@ -1333,6 +1481,8 @@ export default function App() {
       e.preventDefault();
       touchActive = true;
       initAudio();
+      if (gameState === 'stageclear') { nextStage(); return; }
+      if (gameState === 'gameover' && Date.now() - runEndedAt < 800) return;
       if (gameState === 'menu' || gameState === 'gameover') {
         startCountdown();
         return;
@@ -1388,13 +1538,15 @@ export default function App() {
       window.addEventListener('resize', resizeCanvas);
 
       lastTime = performance.now();
-      requestAnimationFrame(gameLoop);
+      animationId = requestAnimationFrame(gameLoop);
     }
 
     init();
 
     // 清理
     return () => {
+      cancelAnimationFrame(animationId);
+      if (audioCtx) void audioCtx.close();
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       canvas.removeEventListener('mousedown', handleMouseDown);
@@ -1430,3 +1582,4 @@ export default function App() {
     </div>
   );
 }
+
