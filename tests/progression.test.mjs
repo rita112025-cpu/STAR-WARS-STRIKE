@@ -1,83 +1,95 @@
-import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
-import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createGame } from '../src/game/Game.ts';
+import { pointsToNextRank, rankIndex, stageClearBonus, stageName } from '../src/game/progression.ts';
 
-// Exercise the actual canvas game closure with a deterministic clock.
-const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-const body = source.split('  useEffect(() => {')[1].split('  }, []);')[0];
-function game(saved = {}, blocked = false) {
-  let now = 10000;
-  const storage = { ...saved };
-  const context = new Proxy({}, { get: () => () => {}, set: () => true });
-  const canvas = { getContext: () => context, parentElement: { clientWidth: 480, clientHeight: 720 }, style: {}, addEventListener() {}, removeEventListener() {} };
-  const sandbox = {
-    canvasRef: { current: canvas }, performance: { now: () => now },
-    Date: { now: () => now }, Math, Number,
-    window: { addEventListener() {}, removeEventListener() {} },
-    localStorage: { getItem(k) { if (blocked) throw Error('blocked'); return storage[k] ?? null; }, setItem(k, v) { if (blocked) throw Error('blocked'); storage[k] = v; } },
-    requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+// 以假 canvas、可控時鐘與記憶體 storage 驅動真正的遊戲邏輯。
+globalThis.window = { addEventListener() {}, removeEventListener() {} };
+globalThis.requestAnimationFrame = () => 1;
+globalThis.cancelAnimationFrame = () => {};
+
+function fakeCanvas() {
+  const ctx = new Proxy({}, { get: () => () => {}, set: () => true });
+  return {
+    getContext: () => ctx,
+    parentElement: { clientWidth: 480, clientHeight: 720 },
+    style: {},
+    addEventListener() {},
+    removeEventListener() {},
   };
-  const instrumented = body.replace('    // 清理', `
-    globalThis.api = {
-      get state() { return { gameState, stage, score, totalScore, lives, highScore, bestStage, shieldActive, maxCombo, combo, bossRef, enemies }; },
-      set(values) { if ('gameState' in values) gameState = values.gameState; if ('score' in values) score = values.score; if ('lives' in values) lives = values.lives; if ('gameTime' in values) gameTime = values.gameTime; if ('deltaTime' in values) deltaTime = values.deltaTime; if ('bossRef' in values) bossRef = values.bossRef; if ('enemies' in values) enemies = values.enemies; },
-      clearStage, nextStage, finishRun, resetGame, update, fireProtonTorpedo, spawnWave, rankIndex
-    };
-    // 清理`);
-  vm.runInNewContext(stripTypeScriptTypes(`(function () {${instrumented}})()`), sandbox);
-  return { api: sandbox.api, storage, advance: ms => { now += ms; } };
+}
+
+function setup(saved = {}, blocked = false) {
+  let now = 10000;
+  const data = { ...saved };
+  const storage = {
+    getItem(k) { if (blocked) throw Error('blocked'); return data[k] ?? null; },
+    setItem(k, v) { if (blocked) throw Error('blocked'); data[k] = v; },
+  };
+  const game = createGame(fakeCanvas(), { now: () => now, storage });
+  return { game, s: game.session, data, advance: ms => { now += ms; } };
 }
 
 test('timer clears stage; rewards bank once; next stage heals and preserves score', () => {
-  const { api, advance } = game();
-  api.set({ gameState: 'playing', score: 1000, lives: 2, gameTime: 0.01, deltaTime: 20 });
-  api.update();
-  assert.equal(api.state.gameState, 'stageclear');
-  assert.equal(api.state.score, 3500);
-  assert.equal(api.state.totalScore, 3500);
-  api.clearStage();
-  assert.equal(api.state.totalScore, 3500);
-  api.nextStage();
-  assert.equal(api.state.stage, 1);
-  advance(801); api.nextStage();
-  assert.equal(api.state.stage, 2);
-  assert.equal(api.state.lives, 3);
-  assert.equal(api.state.shieldActive, true);
-  assert.equal(api.state.score, 3500);
-  api.set({ gameState: 'playing', score: 4000 }); api.finishRun(); api.finishRun();
-  assert.equal(api.state.totalScore, 4000);
-  api.resetGame();
-  assert.equal(api.state.stage, 1);
-  assert.equal(api.state.score, 0);
-  assert.equal(api.state.totalScore, 4000);
+  const { game, s, advance } = setup();
+  Object.assign(s, { gameState: 'playing', score: 1000, lives: 2, gameTime: 0.01 });
+  game.update(20);
+  assert.equal(s.gameState, 'stageclear');
+  assert.equal(s.score, 3500);
+  assert.equal(s.totalScore, 3500);
+  game.clearStage();
+  assert.equal(s.totalScore, 3500);
+  game.nextStage();
+  assert.equal(s.stage, 1);
+  advance(801); game.nextStage();
+  assert.equal(s.stage, 2);
+  assert.equal(s.lives, 3);
+  assert.equal(s.shieldActive, true);
+  assert.equal(s.score, 3500);
+  Object.assign(s, { gameState: 'playing', score: 4000 }); game.finishRun(); game.finishRun();
+  assert.equal(s.totalScore, 4000);
+  game.resetRun();
+  assert.equal(s.stage, 1);
+  assert.equal(s.score, 0);
+  assert.equal(s.totalScore, 4000);
 });
 
 test('scores persist across sessions and rank advances', () => {
-  const { api, storage } = game();
-  api.set({ gameState: 'playing', score: 12000 }); api.finishRun();
-  const reload = game(storage).api;
-  assert.equal(reload.state.totalScore, 12000);
-  assert.equal(reload.state.highScore, 12000);
-  assert.equal(reload.rankIndex(), 1);
+  const { game, s, data } = setup();
+  Object.assign(s, { gameState: 'playing', score: 12000 }); game.finishRun();
+  const reload = setup(data).s;
+  assert.equal(reload.totalScore, 12000);
+  assert.equal(reload.highScore, 12000);
+  assert.equal(rankIndex(reload.totalScore), 1);
 });
 
 test('blocked or corrupt storage still allows play', () => {
-  for (const setup of [game({}, true), game({ sw_strike_total: 'oops', sw_strike_highscore: '-9' })]) {
-    setup.api.set({ gameState: 'playing', score: 100 }); setup.api.finishRun();
-    assert.equal(setup.api.state.totalScore, 100);
+  for (const { game, s } of [setup({}, true), setup({ sw_strike_total: 'oops', sw_strike_highscore: '-9' })]) {
+    Object.assign(s, { gameState: 'playing', score: 100 }); game.finishRun();
+    assert.equal(s.totalScore, 100);
   }
 });
 
 test('torpedo immediately awards enemy, combo milestone and boss kills exactly once', () => {
-  const { api } = game();
-  api.set({ gameState: 'playing', enemies: Array.from({ length: 10 }, () => ({ hp: 1, x: 100, y: 100, type: 'basic' })), bossRef: { hp: 10, x: 240, y: 100 } });
-  api.fireProtonTorpedo();
-  assert.equal(api.state.enemies.length, 0);
-  assert.equal(api.state.bossRef, null);
-  assert.equal(api.state.score, 11000);
-  assert.equal(api.state.maxCombo, 20);
-  api.fireProtonTorpedo();
-  assert.equal(api.state.score, 11000);
+  const { game, s } = setup();
+  Object.assign(s, {
+    gameState: 'playing',
+    enemies: Array.from({ length: 10 }, () => ({ hp: 1, x: 100, y: 100, type: 'basic' })),
+    boss: { hp: 10, x: 240, y: 100 },
+  });
+  game.fireProtonTorpedo();
+  assert.equal(s.enemies.length, 0);
+  assert.equal(s.boss, null);
+  assert.equal(s.score, 11000);
+  assert.equal(s.maxCombo, 20);
+  game.fireProtonTorpedo();
+  assert.equal(s.score, 11000);
+});
+
+test('progression helpers: stage names wrap, bonus and rank distance', () => {
+  assert.equal(stageName(1), '外環巡邏');
+  assert.equal(stageName(6), '外環巡邏');
+  assert.equal(stageClearBonus(3, 2), 5500);
+  assert.equal(pointsToNextRank(0), 10000);
+  assert.equal(pointsToNextRank(400000), null);
 });

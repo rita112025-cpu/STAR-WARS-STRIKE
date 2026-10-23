@@ -62,8 +62,26 @@ git clone https://github.com/rita112025-cpu/neon-serpent.git
 - 最高分、累積分數與最遠抵達關卡保存在目前瀏覽器的 localStorage；換裝置、清除網站資料不會保留，未結算就關閉頁面的本關分數不會入帳。
 - 通關後點擊畫面或按 Enter／空白鍵繼續；陣亡重玩由第一關開始，累積分數保留。
 
+### 程式結構
+
+```
+src/App.tsx              掛載 canvas，呼叫 createGame()
+src/game/
+  config.ts              所有常數：速度、時間、碰撞箱、關卡名、軍階、道具外觀
+  types.ts               實體與遊戲狀態型別
+  progression.ts         純函式：軍階、通關 / 連擊獎勵、難度曲線
+  storage.ts             localStorage 讀寫（封鎖時仍可遊玩）
+  entities.ts            敵機 / BOSS / 道具 / 雷射生成、粒子、碰撞判定
+  audio.ts               Web Audio 音效
+  input.ts               鍵盤、滑鼠、觸控
+  Game.ts                遊戲狀態、關卡流程、每幀更新與迴圈
+  render/                背景、戰機、子彈道具、HUD、各畫面
+```
+
+調整數值改 `config.ts` 或 `progression.ts`；新增畫面改 `render/`。
+
 ### 驗證
 
-`npm test` 使用 Node.js 22.13+ 的內建 TypeScript 移除與測試工具，檢查實際遊戲邏輯中的通關、獎勵、存檔、重玩及魚雷擊殺計分，無需下載測試套件。
+`npm test` 使用 Node.js 22.18+ 內建的 TypeScript 執行與測試工具，直接載入 `src/game` 模組，檢查通關、獎勵、存檔、重玩及魚雷擊殺計分，無需下載測試套件。
 
 完整檢查：`npm ci`、`npm run typecheck`、`npm run build`。

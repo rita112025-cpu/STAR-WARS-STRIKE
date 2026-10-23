@@ -2,6 +2,8 @@ name: Deploy to Pages
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 jobs:
   build:
@@ -17,6 +19,8 @@ jobs:
         with:
           path: ./dist
   deploy:
+    # PR 只驗證 build，只有 main 才部署
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
